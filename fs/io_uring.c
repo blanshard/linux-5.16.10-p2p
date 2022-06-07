@@ -940,6 +940,26 @@ static const struct io_op_def io_op_defs[] = {
 		.audit_skip		= 1,
 		.async_size		= sizeof(struct io_async_rw),
 	},
+	[IORING_OP_READ_DMA] = {
+		.needs_file             = 1,
+		.unbound_nonreg_file    = 1,
+		.pollin                 = 1,
+		.buffer_select          = 1,
+		.needs_async_setup      = 1,
+		.plug                   = 1,
+		.audit_skip             = 1,
+		.async_size             = sizeof(struct io_async_rw),
+	},
+	[IORING_OP_WRITE_DMA] = {
+                .needs_file             = 1,
+                .hash_reg_file          = 1,
+                .unbound_nonreg_file    = 1,
+                .pollout                = 1,
+                .needs_async_setup      = 1,
+                .plug                   = 1,
+                .audit_skip             = 1,
+                .async_size             = sizeof(struct io_async_rw),
+        },
 	[IORING_OP_WRITEV] = {
 		.needs_file		= 1,
 		.hash_reg_file		= 1,
@@ -1149,6 +1169,7 @@ static const struct file_operations io_uring_fops;
 
 static int dmabuf_common_dev_init(void)
 {
+	printk("io_uring: dmabuf_common_dev_init \n");
 	if (dmabuf_common_dev == NULL) {
 		dmabuf_common_dev = kzalloc(sizeof(struct device), GFP_KERNEL);
 		if (dmabuf_common_dev == NULL) {
@@ -1163,6 +1184,7 @@ static int dmabuf_common_dev_init(void)
 
 static void dmabuf_common_dev_exit(void)
 {
+	printk("io_uring: dmabuf_common_dev_exit \n");
 	if (dmabuf_common_dev) {
 		kfree(dmabuf_common_dev);
 		dmabuf_common_dev = NULL;
@@ -1933,6 +1955,7 @@ static noinline bool io_cqring_fill_event(struct io_ring_ctx *ctx, u64 user_data
 
 static inline void io_req_dma_buf_unattach(struct io_kiocb *req)
 {
+	printk("io_uring: io_req_dma_buf_unattach \n");
 	if (req->dmabuf_import.attachment) {
 		dma_buf_unmap_attachment(req->dmabuf_import.attachment, req->dmabuf_import.attachment->sgt, DMA_BIDIRECTIONAL);
 		dma_buf_detach(req->dmabuf_import.attachment->dmabuf, req->dmabuf_import.attachment);
@@ -3002,16 +3025,21 @@ static int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 
 	req->imu = NULL;
 	if (sqe->opcode == IORING_OP_READ_DMA || sqe->opcode == IORING_OP_WRITE_DMA) {
+		printk("io_uring: Preparing DMA Buf Operation, %d \n", sqe->opcode);
 		req->dmabuf_import.attachment = dma_buf_attach(dma_buf_get(sqe->fd_dma_buf), dmabuf_common_dev);
 		if (IS_ERR(req->dmabuf_import.attachment)) {
 			printk("dma_buf_attach() failed\n");
 	                return PTR_ERR(req->dmabuf_import.attachment);
 		}
+		printk("io_uring: Preparing DMA Buf attachment successful  \n");
+
 		if (IS_ERR(dma_buf_map_attachment(req->dmabuf_import.attachment, DMA_BIDIRECTIONAL))) {
 			printk("dma_buf_map_attachment() failed\n");
 			dma_buf_detach(req->dmabuf_import.attachment->dmabuf, req->dmabuf_import.attachment);
 			return PTR_ERR(req->dmabuf_import.attachment->sgt);
 		}
+
+		printk("io_uring: Mapping DMA Buf successful  \n");
 		req->rw.addr = (u64)req->dmabuf_import.attachment->sgt;
 		total_len = 0;
 		for_each_sgtable_sg(req->dmabuf_import.attachment->sgt, sg, idx) {
@@ -3156,12 +3184,15 @@ static int io_import_dma(struct io_kiocb *req, int rw, struct io_rw_state *s)
 	int idx;
 	int sg_id = 0;
 
+	printk("io_uring: io_import_dma processing ... \n");
 	for_each_sgtable_sg(req->dmabuf_import.attachment->sgt, sg, idx) {
 		s->fast_kvec[sg_id].iov_base = sg_virt(sg);
 		s->fast_kvec[sg_id].iov_len = sg->length;
 		sg_id++;
 	}
 	iov_iter_kvec(&s->iter, rw, s->fast_kvec, sg_id, req->rw.len);
+
+	printk("io_uring: io_import_dma success \n");
 	return 0;
 }
 
@@ -3336,6 +3367,7 @@ static struct iovec *__io_import_iovec(int rw, struct io_kiocb *req,
 		return ERR_PTR(io_import_fixed(req, rw, iter));
 
 	if (opcode == IORING_OP_READ_DMA || opcode == IORING_OP_WRITE_DMA) {
+		printk("io_uring: __io_import_iovec processing ... \n");
 		return ERR_PTR(io_import_dma(req, rw, s));
 	}
 
@@ -3528,8 +3560,12 @@ static inline int io_rw_prep_async(struct io_kiocb *req, int rw)
 
 static int io_read_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 {
-	if (unlikely(!(req->file->f_mode & FMODE_READ)))
+	printk("Enter io_read_prep \n");
+	if (unlikely(!(req->file->f_mode & FMODE_READ))) {
+		printk("io_read_prep ERROR \n ");
 		return -EBADF;
+	}
+	printk("Exit io_read_prep \n");
 	return io_prep_rw(req, sqe);
 }
 
@@ -3744,9 +3780,13 @@ out_free:
 
 static int io_write_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 {
-	if (unlikely(!(req->file->f_mode & FMODE_WRITE)))
+	printk("io_write_prep ENTER \n");
+	if (unlikely(!(req->file->f_mode & FMODE_WRITE))) {
+		printk("io_write_prep ERROR \n");
 		return -EBADF;
+	}
 	req->rw.kiocb.ki_hint = ki_hint_validate(file_write_hint(req->file));
+	printk("io_write_prep EXIT \n");
 	return io_prep_rw(req, sqe);
 }
 
@@ -6524,6 +6564,7 @@ static int io_files_update(struct io_kiocb *req, unsigned int issue_flags)
 
 static int io_req_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 {
+	printk("Enter io_req_prep \n");
 	switch (req->opcode) {
 	case IORING_OP_NOP:
 		return 0;
@@ -6531,11 +6572,14 @@ static int io_req_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	case IORING_OP_READ_FIXED:
 	case IORING_OP_READ:
 	case IORING_OP_READ_DMA:
+		printk("io_req_prep: READ req->opcode: %d, file pointer %p \n", req->opcode, req->file);
+
 		return io_read_prep(req, sqe);
 	case IORING_OP_WRITEV:
 	case IORING_OP_WRITE_FIXED:
 	case IORING_OP_WRITE:
 	case IORING_OP_WRITE_DMA:
+		printk("io_req_prep: WRITE req->opcode: %d \n", req->opcode);
 		return io_write_prep(req, sqe);
 	case IORING_OP_POLL_ADD:
 		return io_poll_add_prep(req, sqe);
@@ -6784,12 +6828,14 @@ static int io_issue_sqe(struct io_kiocb *req, unsigned int issue_flags)
 	case IORING_OP_READ_FIXED:
 	case IORING_OP_READ:
 	case IORING_OP_READ_DMA:
+		printk("io_uring: io_issue_sqe READ %d \n", req->opcode);
 		ret = io_read(req, issue_flags);
 		break;
 	case IORING_OP_WRITEV:
 	case IORING_OP_WRITE_FIXED:
 	case IORING_OP_WRITE:
 	case IORING_OP_WRITE_DMA:
+		printk("io_uring: io_issue_sqe WRITE %d \n", req->opcode);
 		ret = io_write(req, issue_flags);
 		break;
 	case IORING_OP_FSYNC:
@@ -7229,6 +7275,7 @@ static int io_init_req(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	int personality;
 	u8 opcode;
 
+	printk("io_init_req Enter \n");
 	/* req is partially pre-initialised, see io_preinit_req() */
 	req->opcode = opcode = READ_ONCE(sqe->opcode);
 	/* same numerical values with corresponding REQ_F_*, safe to copy */
@@ -7266,8 +7313,10 @@ static int io_init_req(struct io_ring_ctx *ctx, struct io_kiocb *req,
 		}
 	}
 
+	printk("IOURING needs file execution starts....\n");
 	if (io_op_defs[opcode].needs_file) {
 		struct io_submit_state *state = &ctx->submit_state;
+		printk("IOURING needs file execution\n");
 
 		/*
 		 * Plug now if we have more than 2 IO left after this, and the
@@ -7301,6 +7350,7 @@ static int io_init_req(struct io_ring_ctx *ctx, struct io_kiocb *req,
 		req->flags |= REQ_F_CREDS;
 	}
 
+	printk("io_init_req Exit \n");
 	return io_req_prep(req, sqe);
 }
 
@@ -7311,6 +7361,7 @@ static int io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	struct io_submit_link *link = &ctx->submit_state.link;
 	int ret;
 
+	printk("io_submit_sqe Enter \n");
 	ret = io_init_req(ctx, req, sqe);
 	if (unlikely(ret)) {
 		trace_io_uring_req_failed(sqe, ret);
@@ -7377,6 +7428,7 @@ static int io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 		return 0;
 	}
 
+	printk("io_submit_sqe Exit \n");
 	io_queue_sqe(req);
 	return 0;
 }
@@ -7459,6 +7511,7 @@ static int io_submit_sqes(struct io_ring_ctx *ctx, unsigned int nr)
 	unsigned int entries = io_sqring_entries(ctx);
 	int submitted = 0;
 
+	printk("io_submit_sqes ENTER \n");
 	if (unlikely(!entries))
 		return 0;
 	/* make sure SQ entry isn't read before tail */
@@ -7498,6 +7551,7 @@ static int io_submit_sqes(struct io_ring_ctx *ctx, unsigned int nr)
 	 /* Commit SQ ring head once we've consumed and submitted all SQEs */
 	io_commit_sqring(ctx);
 
+	printk("io_submit_sqes EXIT \n");
 	return submitted;
 }
 
@@ -7528,6 +7582,7 @@ static int __io_sq_thread(struct io_ring_ctx *ctx, bool cap_entries)
 	unsigned int to_submit;
 	int ret = 0;
 
+	printk("__io_sq_thread ENTER \n");
 	to_submit = io_sqring_entries(ctx);
 	/* if we're handling multiple rings, cap submit size for fairness */
 	if (cap_entries && to_submit > IORING_SQPOLL_CAP_ENTRIES_VALUE)
@@ -7558,6 +7613,7 @@ static int __io_sq_thread(struct io_ring_ctx *ctx, bool cap_entries)
 			revert_creds(creds);
 	}
 
+	printk("__io_sq_thread EXIT \n");
 	return ret;
 }
 
@@ -7595,6 +7651,7 @@ static int io_sq_thread(void *data)
 	char buf[TASK_COMM_LEN];
 	DEFINE_WAIT(wait);
 
+	printk("io_sq_thread ENTER \n");
 	snprintf(buf, sizeof(buf), "iou-sqp-%d", sqd->task_pid);
 	set_task_comm(current, buf);
 
@@ -7674,6 +7731,7 @@ static int io_sq_thread(void *data)
 	audit_free(current);
 
 	complete(&sqd->exited);
+	printk("io_sq_thread EXIT \n");
 	do_exit(0);
 }
 
@@ -10135,6 +10193,7 @@ SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit,
 	struct fd f;
 	long ret;
 
+	printk("SYSCALL_DEFINE6 ENTER \n");
 	io_run_task_work();
 
 	if (unlikely(flags & ~(IORING_ENTER_GETEVENTS | IORING_ENTER_SQ_WAKEUP |
@@ -10214,10 +10273,12 @@ SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit,
 		}
 	}
 
+
 out:
 	percpu_ref_put(&ctx->refs);
 out_fput:
 	fdput(f);
+	printk("SYSCALL_DEFINE6 EXIT \n");
 	return submitted ? submitted : ret;
 }
 
