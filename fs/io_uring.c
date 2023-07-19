@@ -704,9 +704,9 @@ struct io_async_msghdr {
 
 struct io_rw_state {
 	struct iov_iter			iter;
-	struct iov_iter_state		iter_state;
+	struct iov_iter_state	iter_state;
 	struct iovec			fast_iov[UIO_FASTIOV];
-	struct kvec                     fast_kvec[UIO_FASTIOV]; //TODO: Do separate #define
+	struct kvec             fast_kvec[UIO_FASTIOV]; //TODO: Do separate #define
 };
 
 struct io_async_rw {
@@ -815,10 +815,6 @@ enum {
 	IORING_RSRC_BUFFER		= 1,
 };
 
-struct dma_buf_import_ctxt {
-	struct dma_buf_attachment *attachment;
-};
-
 /*
  * NOTE! Each of the iocb union members has the file pointer
  * as the first entry in their struct definition. So you can
@@ -888,8 +884,6 @@ struct io_kiocb {
 	const struct cred		*creds;
 	/* stores selected buf, valid IFF REQ_F_BUFFER_SELECTED is set */
 	struct io_buffer		*kbuf;
-
-	struct dma_buf_import_ctxt      dmabuf_import;
 };
 
 struct io_tctx_node {
@@ -971,6 +965,24 @@ static const struct io_op_def io_op_defs[] = {
 		.audit_skip		= 1,
 		.async_size		= sizeof(struct io_async_rw),
 	},
+	[IORING_OP_READ_DMA] = {
+		.needs_file		= 1,
+		.unbound_nonreg_file	= 1,
+		.pollin			= 1,
+		.buffer_select		= 1,
+		.plug			= 1,
+		.audit_skip		= 1,
+		.async_size		= sizeof(struct io_async_rw),
+	},
+	[IORING_OP_WRITE_DMA] = {
+		.needs_file		= 1,
+		.hash_reg_file		= 1,
+		.unbound_nonreg_file	= 1,
+		.pollout		= 1,
+		.plug			= 1,
+		.audit_skip		= 1,
+		.async_size		= sizeof(struct io_async_rw),
+	},	
 	[IORING_OP_POLL_ADD] = {
 		.needs_file		= 1,
 		.unbound_nonreg_file	= 1,
@@ -1106,8 +1118,6 @@ static const struct io_op_def io_op_defs[] = {
 	[IORING_OP_LINKAT] = {},
 };
 
-struct device *dmabuf_common_dev;
-
 /* requests with any of those set should undergo io_disarm_next() */
 #define IO_DISARM_MASK (REQ_F_ARM_LTIMEOUT | REQ_F_LINK_TIMEOUT | REQ_F_FAIL)
 
@@ -1146,28 +1156,6 @@ static enum hrtimer_restart io_link_timeout_fn(struct hrtimer *timer);
 static struct kmem_cache *req_cachep;
 
 static const struct file_operations io_uring_fops;
-
-static int dmabuf_common_dev_init(void)
-{
-	if (dmabuf_common_dev == NULL) {
-		dmabuf_common_dev = kzalloc(sizeof(struct device), GFP_KERNEL);
-		if (dmabuf_common_dev == NULL) {
-			printk("Unable to allocate dma_buf common device instance in IO uring\n");
-			return -1;
-		}
-		dev_set_name(dmabuf_common_dev, "gpukmd_dmabuf_import");
-	}
-
-	return 0;
-}
-
-static void dmabuf_common_dev_exit(void)
-{
-	if (dmabuf_common_dev) {
-		kfree(dmabuf_common_dev);
-		dmabuf_common_dev = NULL;
-	}
-}
 
 struct sock *io_uring_get_socket(struct file *file)
 {
@@ -1931,15 +1919,6 @@ static noinline bool io_cqring_fill_event(struct io_ring_ctx *ctx, u64 user_data
 	return __io_cqring_fill_event(ctx, user_data, res, cflags);
 }
 
-static inline void io_req_dma_buf_unattach(struct io_kiocb *req)
-{
-	if (req->dmabuf_import.attachment) {
-		dma_buf_unmap_attachment(req->dmabuf_import.attachment, req->dmabuf_import.attachment->sgt, DMA_BIDIRECTIONAL);
-		dma_buf_detach(req->dmabuf_import.attachment->dmabuf, req->dmabuf_import.attachment);
-		req->dmabuf_import.attachment = NULL;
-	}
-}
-
 static void io_req_complete_post(struct io_kiocb *req, s32 res,
 				 u32 cflags)
 {
@@ -1961,7 +1940,7 @@ static void io_req_complete_post(struct io_kiocb *req, s32 res,
 			}
 		}
 		if (req->opcode == IORING_OP_READ_DMA || req->opcode == IORING_OP_WRITE_DMA) {
-			io_req_dma_buf_unattach(req);
+			
 		}
 		io_req_put_rsrc(req, ctx);
 		io_dismantle_req(req);
@@ -2946,9 +2925,8 @@ static int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	struct file *file = req->file;
 	unsigned ioprio;
 	int ret;
-	int idx;
-	struct scatterlist *sg;
-	uint32_t total_len;
+
+	printk(KERN_INFO "io_uring: io_prep_rw() SQE addr %llx\n", sqe->addr);
 
 	if (!io_req_ffs_set(req))
 		req->flags |= io_file_get_flags(file) << REQ_F_SUPPORT_NOWAIT_BIT;
@@ -3001,30 +2979,7 @@ static int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	}
 
 	req->imu = NULL;
-	if (sqe->opcode == IORING_OP_READ_DMA || sqe->opcode == IORING_OP_WRITE_DMA) {
-		req->dmabuf_import.attachment = dma_buf_attach(dma_buf_get(sqe->fd_dma_buf), dmabuf_common_dev);
-		if (IS_ERR(req->dmabuf_import.attachment)) {
-			printk("dma_buf_attach() failed\n");
-	                return PTR_ERR(req->dmabuf_import.attachment);
-		}
-		if (IS_ERR(dma_buf_map_attachment(req->dmabuf_import.attachment, DMA_BIDIRECTIONAL))) {
-			printk("dma_buf_map_attachment() failed\n");
-			dma_buf_detach(req->dmabuf_import.attachment->dmabuf, req->dmabuf_import.attachment);
-			return PTR_ERR(req->dmabuf_import.attachment->sgt);
-		}
-		req->rw.addr = (u64)req->dmabuf_import.attachment->sgt;
-		total_len = 0;
-		for_each_sgtable_sg(req->dmabuf_import.attachment->sgt, sg, idx) {
-			total_len += sg->length;
-		}
-		if (total_len != sqe->len) {
-			printk("Total length(%u) of sg table not matching with sqe len(%u)\n", total_len, sqe->len);
-			io_req_dma_buf_unattach(req);
-			return -EINVAL;
-		}
-	} else {
-		req->rw.addr = READ_ONCE(sqe->addr);
-	}
+	req->rw.addr = READ_ONCE(sqe->addr);
 	req->rw.len = READ_ONCE(sqe->len);
 	req->buf_index = READ_ONCE(sqe->buf_index);
 	return 0;
@@ -3147,21 +3102,6 @@ static int __io_import_fixed(struct io_kiocb *req, int rw, struct iov_iter *iter
 		}
 	}
 
-	return 0;
-}
-
-static int io_import_dma(struct io_kiocb *req, int rw, struct io_rw_state *s)
-{
-	struct scatterlist *sg;
-	int idx;
-	int sg_id = 0;
-
-	for_each_sgtable_sg(req->dmabuf_import.attachment->sgt, sg, idx) {
-		s->fast_kvec[sg_id].iov_base = sg_virt(sg);
-		s->fast_kvec[sg_id].iov_len = sg->length;
-		sg_id++;
-	}
-	iov_iter_kvec(&s->iter, rw, s->fast_kvec, sg_id, req->rw.len);
 	return 0;
 }
 
@@ -3335,10 +3275,6 @@ static struct iovec *__io_import_iovec(int rw, struct io_kiocb *req,
 	if (opcode == IORING_OP_READ_FIXED || opcode == IORING_OP_WRITE_FIXED)
 		return ERR_PTR(io_import_fixed(req, rw, iter));
 
-	if (opcode == IORING_OP_READ_DMA || opcode == IORING_OP_WRITE_DMA) {
-		return ERR_PTR(io_import_dma(req, rw, s));
-	}
-
 	/* buffer index only valid with fixed read/write, or buffer select  */
 	if (unlikely(req->buf_index && !(req->flags & REQ_F_BUFFER_SELECT)))
 		return ERR_PTR(-EINVAL);
@@ -3346,7 +3282,8 @@ static struct iovec *__io_import_iovec(int rw, struct io_kiocb *req,
 	buf = u64_to_user_ptr(req->rw.addr);
 	sqe_len = req->rw.len;
 
-	if (opcode == IORING_OP_READ || opcode == IORING_OP_WRITE) {
+	if (opcode == IORING_OP_READ || opcode == IORING_OP_WRITE 
+	    || opcode == IORING_OP_READ_DMA || opcode == IORING_OP_WRITE_DMA) {
 		if (req->flags & REQ_F_BUFFER_SELECT) {
 			buf = io_rw_buffer_select(req, &sqe_len, issue_flags);
 			if (IS_ERR(buf))
@@ -6703,7 +6640,9 @@ static void io_clean_op(struct io_kiocb *req)
 		case IORING_OP_READ:
 		case IORING_OP_WRITEV:
 		case IORING_OP_WRITE_FIXED:
-		case IORING_OP_WRITE: {
+		case IORING_OP_WRITE:
+		case IORING_OP_READ_DMA:
+		case IORING_OP_WRITE_DMA: {
 			struct io_async_rw *io = req->async_data;
 
 			kfree(io->free_iovec);
@@ -6775,6 +6714,8 @@ static int io_issue_sqe(struct io_kiocb *req, unsigned int issue_flags)
 
 	if (!io_op_defs[req->opcode].audit_skip)
 		audit_uring_entry(req->opcode);
+
+	printk(KERN_INFO "io_uring: io_issue_sqe() opcode %d\n", req->opcode);
 
 	switch (req->opcode) {
 	case IORING_OP_NOP:
@@ -9699,7 +9640,6 @@ static __cold void io_ring_ctx_wait_and_kill(struct io_ring_ctx *ctx)
 	io_iopoll_try_reap_events(ctx);
 
 	INIT_WORK(&ctx->exit_work, io_ring_exit_work);
-	dmabuf_common_dev_exit();
 	/*
 	 * Use system_unbound_wq to avoid spawning tons of event kworkers
 	 * if we're exiting a ton of rings at the same time. It just adds
@@ -10501,10 +10441,6 @@ static __cold int io_uring_create(unsigned entries, struct io_uring_params *p,
 		if (!(p->flags & IORING_SETUP_CLAMP))
 			return -EINVAL;
 		entries = IORING_MAX_ENTRIES;
-	}
-
-	if (dmabuf_common_dev_init()) {
-		return -ENOMEM;
 	}
 
 	/*
