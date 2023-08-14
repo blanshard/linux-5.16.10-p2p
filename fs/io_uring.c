@@ -210,6 +210,7 @@ enum io_uring_cmd_flags {
 struct io_mapped_ubuf {
 	u64		ubuf;
 	u64		ubuf_end;
+	s32		dma_buf;
 	unsigned int	nr_bvecs;
 	unsigned long	acct_pages;
 	struct bio_vec	bvec[];
@@ -969,7 +970,6 @@ static const struct io_op_def io_op_defs[] = {
 		.needs_file		= 1,
 		.unbound_nonreg_file	= 1,
 		.pollin			= 1,
-		.buffer_select		= 1,
 		.plug			= 1,
 		.audit_skip		= 1,
 		.async_size		= sizeof(struct io_async_rw),
@@ -1169,6 +1169,41 @@ struct sock *io_uring_get_socket(struct file *file)
 	return NULL;
 }
 EXPORT_SYMBOL(io_uring_get_socket);
+
+int io_uring_map_dmabuf(struct request *req)
+{
+	struct bio_vec bvec;
+	struct req_iterator iter;
+	unsigned int i, j;
+
+	struct io_uring_task *tctx = current->io_uring;
+
+	if (current->io_uring == NULL)
+		return 0;
+
+	struct io_ring_ctx *ctx = tctx->last;
+	struct io_mapped_ubuf *imu;
+	printk(KERN_INFO "io_uring: io_uring_map_dmabuf ctx.sq_entries %u ctx.nr_user_bufs %u\n", ctx->sq_entries, ctx->nr_user_bufs);
+
+	rq_for_each_segment(bvec, req, iter) {
+		printk(KERN_INFO "io_uring: io_uring_map_dmabuf bvec.index %lu bvec.bv_len %u\n", bvec.bv_page->index, bvec.bv_len);
+
+		for (i = 0; i < ctx->nr_user_bufs; i++) {
+			imu = ctx->user_bufs[i];
+			for (j = 0; j < imu->nr_bvecs; j++) {
+				if(bvec.bv_page->index == imu->bvec[j].bv_page->index) {
+					printk(KERN_INFO "io_uring: io_uring_map_dmabuf imu.dma_buf %u\n", imu->dma_buf);
+					return imu->dma_buf;
+				}
+				//printk(KERN_INFO "io_uring: io_uring_map_dmabuf imu.bvec.index %lu imu.bvec.bv_len %u\n", imu->bvec[j].bv_page->index, imu->bvec[j].bv_len);
+			}
+		}
+	}
+
+	return 0;
+}
+
+EXPORT_SYMBOL(io_uring_map_dmabuf);
 
 static inline void io_tw_lock(struct io_ring_ctx *ctx, bool *locked)
 {
@@ -1938,9 +1973,6 @@ static void io_req_complete_post(struct io_kiocb *req, s32 res,
 				io_req_task_queue(req->link);
 				req->link = NULL;
 			}
-		}
-		if (req->opcode == IORING_OP_READ_DMA || req->opcode == IORING_OP_WRITE_DMA) {
-			
 		}
 		io_req_put_rsrc(req, ctx);
 		io_dismantle_req(req);
@@ -2926,7 +2958,17 @@ static int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	unsigned ioprio;
 	int ret;
 
+	u8 opcode = req->opcode;
+
 	printk(KERN_INFO "io_uring: io_prep_rw() SQE addr %llx\n", sqe->addr);
+
+	if(opcode == IORING_OP_READ_DMA || opcode == IORING_OP_WRITE_DMA)
+	{
+		printk(KERN_INFO "io_uring: io_prep_rw() SQE buf_index %u\n",  sqe->buf_index);		
+		printk(KERN_INFO "io_uring: io_prep_rw() SQE fd_dma_buf %u\n", sqe->fd_dma_buf);
+
+		ctx->user_bufs[sqe->buf_index]->dma_buf = sqe->fd_dma_buf;			
+	}
 
 	if (!io_req_ffs_set(req))
 		req->flags |= io_file_get_flags(file) << REQ_F_SUPPORT_NOWAIT_BIT;
@@ -3272,7 +3314,8 @@ static struct iovec *__io_import_iovec(int rw, struct io_kiocb *req,
 
 	BUILD_BUG_ON(ERR_PTR(0) != NULL);
 
-	if (opcode == IORING_OP_READ_FIXED || opcode == IORING_OP_WRITE_FIXED)
+	if (opcode == IORING_OP_READ_FIXED || opcode == IORING_OP_WRITE_FIXED 
+	    || opcode == IORING_OP_READ_DMA || opcode == IORING_OP_WRITE_DMA)
 		return ERR_PTR(io_import_fixed(req, rw, iter));
 
 	/* buffer index only valid with fixed read/write, or buffer select  */
@@ -3282,8 +3325,7 @@ static struct iovec *__io_import_iovec(int rw, struct io_kiocb *req,
 	buf = u64_to_user_ptr(req->rw.addr);
 	sqe_len = req->rw.len;
 
-	if (opcode == IORING_OP_READ || opcode == IORING_OP_WRITE 
-	    || opcode == IORING_OP_READ_DMA || opcode == IORING_OP_WRITE_DMA) {
+	if (opcode == IORING_OP_READ || opcode == IORING_OP_WRITE) {
 		if (req->flags & REQ_F_BUFFER_SELECT) {
 			buf = io_rw_buffer_select(req, &sqe_len, issue_flags);
 			if (IS_ERR(buf))
@@ -6715,8 +6757,6 @@ static int io_issue_sqe(struct io_kiocb *req, unsigned int issue_flags)
 	if (!io_op_defs[req->opcode].audit_skip)
 		audit_uring_entry(req->opcode);
 
-	printk(KERN_INFO "io_uring: io_issue_sqe() opcode %d\n", req->opcode);
-
 	switch (req->opcode) {
 	case IORING_OP_NOP:
 		ret = io_nop(req, issue_flags);
@@ -9167,6 +9207,8 @@ static int io_sqe_buffer_register(struct io_ring_ctx *ctx, struct iovec *iov,
 		imu->bvec[i].bv_offset = off;
 		off = 0;
 		size -= vec_len;
+
+		printk(KERN_INFO "io_uring: io_sqe_buffer_register imu->bvec[i].bv_page.index %lu imu->bvec[i].bv_len %u\n", imu->bvec[i].bv_page->index, imu->bvec[i].bv_len);
 	}
 	/* store original address for later verification */
 	imu->ubuf = ubuf;

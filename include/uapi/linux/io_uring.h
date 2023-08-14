@@ -60,7 +60,10 @@ struct io_uring_sqe {
 		__s32	splice_fd_in;
 		__u32	file_index;
 	};
-	__u64	__pad2[2];
+	__s32   fd_dma_buf;   /* dma_buf fd */
+	__u32   __pad;	
+	__u64	__pad2;
+
 };
 
 enum {
@@ -70,6 +73,7 @@ enum {
 	IOSQE_IO_HARDLINK_BIT,
 	IOSQE_ASYNC_BIT,
 	IOSQE_BUFFER_SELECT_BIT,
+	IOSQE_CQE_SKIP_SUCCESS_BIT,
 };
 
 /*
@@ -87,6 +91,8 @@ enum {
 #define IOSQE_ASYNC		(1U << IOSQE_ASYNC_BIT)
 /* select buffer from sqe->buf_group */
 #define IOSQE_BUFFER_SELECT	(1U << IOSQE_BUFFER_SELECT_BIT)
+/* don't post CQE if request succeeded */
+#define IOSQE_CQE_SKIP_SUCCESS	(1U << IOSQE_CQE_SKIP_SUCCESS_BIT)
 
 /*
  * io_uring_setup() flags
@@ -106,6 +112,8 @@ enum {
 	IORING_OP_FSYNC,
 	IORING_OP_READ_FIXED,
 	IORING_OP_WRITE_FIXED,
+	IORING_OP_READ_DMA,
+	IORING_OP_WRITE_DMA,
 	IORING_OP_POLL_ADD,
 	IORING_OP_POLL_REMOVE,
 	IORING_OP_SYNC_FILE_RANGE,
@@ -289,6 +297,7 @@ struct io_uring_params {
 #define IORING_FEAT_EXT_ARG		(1U << 8)
 #define IORING_FEAT_NATIVE_WORKERS	(1U << 9)
 #define IORING_FEAT_RSRC_TAGS		(1U << 10)
+#define IORING_FEAT_CQE_SKIP		(1U << 11)
 
 /*
  * io_uring_register(2) opcodes and arguments
@@ -378,7 +387,7 @@ struct io_uring_probe {
 	__u8 ops_len;	/* length of ops[] array below */
 	__u16 resv;
 	__u32 resv2[3];
-	struct io_uring_probe_op ops[0];
+	struct io_uring_probe_op ops[];
 };
 
 struct io_uring_restriction {
